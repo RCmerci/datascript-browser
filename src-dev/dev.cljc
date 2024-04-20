@@ -31,7 +31,8 @@
                      config))
 
        (comment (.stop server))
-       )))
+       )
+     (future (-main))))
 
 #?(:cljs ;; Client Entrypoint
    (do
