@@ -3,7 +3,7 @@
             [hyperfiddle.electric-dom2 :as dom]
             [hyperfiddle.electric-ui4 :as ui]
             [fipp.edn :as fipp]
-            #?(:clj [clojure.zip :as z])
+            [clojure.zip :as z]
             #?(:clj [datascript.core :as d])
             #?(:clj [datascript.transit :as dt])
             #?(:clj [clojure.java.io :as io])
@@ -12,19 +12,34 @@
 #?(:clj
    (def *conn-info (atom {:conn nil
                           :file nil
-                          :err  nil
-                          :root-eid nil})))
+                          :err  nil})))
+
+#?(:cljs
+   (def *client-state (atom {:db-loaded false
+                             :outliner-root-eid nil
+                             :block-detail-eid nil
+                             :block-detail nil})))
 
 (defn pp-str
   [x & [opts]]
   (with-out-str (fipp/pprint x opts)))
 
+(e/defn EdnView
+  [m]
+  (e/client
+    (dom/pre (dom/text (pp-str m {:width 20})))))
 
-(e/defn ConnInfo
+
+(e/defn StateInfo
   []
   (e/client
-    (let [conn-info (e/server (select-keys (e/watch *conn-info) [:file :err :root-eid]))]
-      (dom/pre (dom/text (pp-str conn-info {:width 20}))))))
+   (let [conn-info (e/server (select-keys (e/watch *conn-info) [:file :err]))
+         client-state (e/watch *client-state)]
+     (dom/div (dom/props {:class "row"})
+              (EdnView. (assoc conn-info :type :server))
+              (EdnView. (-> client-state
+                            (assoc :type :client)
+                            (dissoc :block-detail)))))))
 
 #?(:clj
    (do
@@ -32,9 +47,11 @@
        [filepath]
        (try
          (let [conn (d/conn-from-db (dt/read-transit (io/input-stream (io/file filepath))))]
-           (swap! *conn-info assoc :conn conn :file filepath :err nil))
+           (swap! *conn-info assoc :conn conn :file filepath :err nil)
+           true)
          (catch Exception e
-           (swap! *conn-info assoc :conn nil :file filepath :err (ex-message e)))))
+           (swap! *conn-info assoc :conn nil :file filepath :err (ex-message e))
+           false)))
 
      (defn- sort-by-left
        [blocks parent]
@@ -67,38 +84,73 @@
                           loc)]
                (recur (z/next loc*)))))))
 
-     (defn- select-key-for-tree
-       [tree k]
+     (defn- entity-tree->map-tree
+       [db tree]
        (loop [loc (z/vector-zip tree)]
          (cond
            (z/end? loc) (z/root loc)
            (z/branch? loc) (recur (z/next loc))
            :else
            (let [node (z/node loc)
-                 v (if (sequential? k)
-                     (get-in node k)
-                     (get node k))]
+                 v (update (d/pull db '[*] (:db/id node))
+                           :block/uuid str)]
              (recur (z/next (z/replace loc v)))))))
 
      (defn- get-block-tree
-       [root-eid k]
+       [root-eid]
        (when-let [conn (:conn @*conn-info)]
          (let [ent-tree (get-block-entities-tree @conn root-eid)]
-           (select-key-for-tree ent-tree k))))))
+           (entity-tree->map-tree @conn ent-tree))))))
+
+(defn- tree->list-with-level
+  [tree]
+  (loop [loc (z/vector-zip tree) r [] level 0]
+    (cond
+      (nil? loc) r
+      (z/end? loc) r
+      (z/branch? loc)
+      (if-let [loc* (z/down loc)]
+        (recur loc* r (inc level))
+        (recur (z/next loc) r level))
+      :else
+      (let [r* (conj r (assoc (z/node loc) :level level))]
+        (if-let [right-loc (z/right loc)]
+          (recur right-loc r* level)
+          (let [[loc* level*]
+                (loop [loc loc level level]
+                  (when-let [loc* (z/up loc)]
+                    (if-let [loc*-right (z/right loc*)]
+                      [loc*-right (dec level)]
+                      (recur loc* (dec level)))))]
+            (recur loc* r* level*)))))))
 
 
-
-(e/defn DisplayOutlinerTree
-  [!root-eid !k]
+(e/defn OutlinerTreeViewHelper
+  [tree k]
   (e/client
-   (let [root-eid (e/watch !root-eid)
-         root-eid (if (string? root-eid) (edn/read-string root-eid) root-eid)
-         k (or (edn/read-string (e/watch !k)) :db/id)]
-     (when root-eid
-       (let [tree
-             (e/server
-              (e/offload #(get-block-tree root-eid k)))]
-         (dom/pre (dom/text (pp-str tree {:width 10}))))))))
+    (let [list-with-level (tree->list-with-level tree)]
+      (dom/div
+        (dom/props {:id "outliner-tree"})
+        (e/for-by
+            :db/id [x list-with-level]
+            (dom/pre (dom/props {:style {:padding-left (str (* (:level x) 10) "px")}})
+                     (dom/text "- " (str (get x k)))
+                     (dom/on "click" (e/fn [e] (swap! *client-state assoc
+                                                      :block-detail-eid (:db/id x)
+                                                      :block-detail x)))))))))
+
+
+(e/defn OutlinerTreeView
+  [!k]
+  (e/client
+    (let [root-eid (:outliner-root-eid (e/watch *client-state))
+          root-eid (if (string? root-eid) (edn/read-string root-eid) root-eid)
+          k (or (edn/read-string (e/watch !k)) :db/id)]
+      (when root-eid
+        (let [tree
+              (e/server
+                (e/offload #(get-block-tree root-eid)))]
+          (OutlinerTreeViewHelper. tree k))))))
 
 (e/defn InputSubmit
   [F placeholder]
@@ -106,6 +158,7 @@
    (dom/input (dom/props {:placeholder (str placeholder " (Enter)")
                           :style {:width "200px"}})
               (dom/on "keydown" (e/fn [e]
+                                  (.stopPropagation e)
                                   (when (= "Enter" (.-key e))
                                     (when-let [v (not-empty (-> e .-target .-value))]
                                       (new F v))))))))
@@ -117,21 +170,38 @@
             (dom/div
              (let [!filepath (atom nil) filepath (e/watch !filepath)]
                (ui/input filepath (e/fn [v] (reset! !filepath v))
-                         (dom/props {:placeholder "DB filepath"}))
+                 (dom/props {:placeholder "DB filepath"})
+                 (dom/on "keydown" (e/fn [e] (.stopPropagation e))))
                (ui/button (e/fn []
                             (when (seq filepath)
-                              (e/server (e/offload #(load-db-file filepath)))))
+                              (let [succ? (e/server (e/offload #(load-db-file filepath)))]
+                                (swap! *client-state assoc :db-loaded succ?))))
                           (dom/text "Load"))))
-            (ConnInfo.)
+            (StateInfo.)
             (when (e/server (some? (:conn (e/watch *conn-info))))
-              (let [!root-eid (atom nil)
-                    !k (atom nil)]
-                (InputSubmit. (e/fn [v] (reset! !root-eid v)) "eid")
+              (let [!k (atom nil)]
+                (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid")
                 (InputSubmit. (e/fn [v] (reset! !k v)) "key to display")
-                (DisplayOutlinerTree. !root-eid !k))))))
+                (dom/div (dom/props {:class "row"})
+                 (OutlinerTreeView. !k)
+                 (when-let [block-detail (:block-detail (e/watch *client-state))]
+                   (EdnView. block-detail))))))))
+
+
 
 
 (e/defn Main [ring-request]
   (e/client
    (binding [dom/node js/document.body]
+     (dom/on dom/node "keydown"
+             (e/fn [e]
+               (when (and (= "ArrowUp" (-> e .-key))
+                          (:db-loaded @*client-state))
+                 (when-let [root-eid (:outliner-root-eid @*client-state)]
+                   (let [up-eid
+                         (e/server
+                          (when-let [conn (:conn @*conn-info)]
+                            (:db/id (:block/parent (d/entity @conn root-eid)))))]
+                     (when up-eid
+                       (swap! *client-state assoc :outliner-root-eid up-eid)))))))
      (OutlinerBrowser.))))

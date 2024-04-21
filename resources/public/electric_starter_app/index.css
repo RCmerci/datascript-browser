@@ -1,6 +1,15 @@
 .column {
-  display: flex;
-  flex-direction: column;
+    display: flex;
+    flex-direction: column;
+}
+
+.row {
+    display: flex;
+    flex-direction: row;
+}
+
+.row pre {
+    margin-right: 30px;
 }
 
 input {
@@ -11,4 +20,14 @@ input {
 button {
     width: 80px;
     padding: 5px 10px;
+}
+
+#outliner-tree pre {
+    width: 75%;
+    margin: 1px;
+    cursor: pointer;
+}
+
+#outliner-tree pre:hover {
+    background-color: #e0e0e0;
 }
