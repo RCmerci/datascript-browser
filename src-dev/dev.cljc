@@ -1,8 +1,8 @@
 (ns dev
   (:require
-   electric-starter-app.main
+   datascript-browser.main
    [hyperfiddle.electric :as e]
-   #?(:clj [electric-starter-app.server-jetty :as jetty])
+   #?(:clj [datascript-browser.server-jetty :as jetty])
    #?(:clj [shadow.cljs.devtools.api :as shadow])
    #?(:clj [shadow.cljs.devtools.server :as shadow-server])
    #?(:clj [clojure.tools.logging :as log])))
@@ -27,7 +27,7 @@
 
        (def server (jetty/start-server!
                      (fn [ring-request]
-                       (e/boot-server {} electric-starter-app.main/Main ring-request))
+                       (e/boot-server {} datascript-browser.main/Main ring-request))
                      config))
 
        (comment (.stop server))
@@ -36,7 +36,7 @@
 
 #?(:cljs ;; Client Entrypoint
    (do
-     (def electric-entrypoint (e/boot-client {} electric-starter-app.main/Main nil))
+     (def electric-entrypoint (e/boot-client {} datascript-browser.main/Main nil))
 
      (defonce reactor nil)
 

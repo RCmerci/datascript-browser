@@ -1,4 +1,4 @@
-(ns electric-starter-app.main
+(ns datascript-browser.main
   (:require [hyperfiddle.electric :as e]
             [hyperfiddle.electric-dom2 :as dom]
             [hyperfiddle.electric-ui4 :as ui]

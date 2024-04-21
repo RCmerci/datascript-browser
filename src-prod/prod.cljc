@@ -4,8 +4,8 @@
    #?(:clj [clojure.java.io :as io])
    #?(:clj [clojure.tools.logging :as log])
    [contrib.assert :refer [check]]
-   electric-starter-app.main
-   #?(:clj [electric-starter-app.server-jetty :as jetty])
+   datascript-browser.main
+   #?(:clj [datascript-browser.server-jetty :as jetty])
    [hyperfiddle.electric :as e])
   #?(:cljs (:require-macros [prod :refer [compile-time-resource]])))
 
@@ -31,14 +31,14 @@
      (log/info (pr-str config))
      (check string? (::e/user-version config))
      (jetty/start-server!
-       (fn [ring-req] (e/boot-server {} electric-starter-app.main/Main ring-req))
+       (fn [ring-req] (e/boot-server {} datascript-browser.main/Main ring-req))
        config)))
 
 ;;; Prod client entrypoint
 
 #?(:cljs
    (do
-     (def electric-entrypoint (e/boot-client {} electric-starter-app.main/Main nil))
+     (def electric-entrypoint (e/boot-client {} datascript-browser.main/Main nil))
      (defn ^:export start! []
        (electric-entrypoint
          #(js/console.log "Reactor success:" %)
