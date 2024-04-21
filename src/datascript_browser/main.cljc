@@ -92,8 +92,9 @@
            (z/branch? loc) (recur (z/next loc))
            :else
            (let [node (z/node loc)
-                 v (update (d/pull db '[*] (:db/id node))
-                           :block/uuid str)]
+                 v (some->> (:db/id node)
+                            (d/pull db '[*]))
+                 v (update v :block/uuid str)]
              (recur (z/next (z/replace loc v)))))))
 
      (defn- get-block-tree
@@ -168,19 +169,18 @@
   (e/client
    (dom/div (dom/props {:class "column"})
             (dom/div
-             (let [!filepath (atom nil) filepath (e/watch !filepath)]
+             (let [!filepath (atom "db.json") filepath (e/watch !filepath)]
                (ui/input filepath (e/fn [v] (reset! !filepath v))
                  (dom/props {:placeholder "DB filepath"})
                  (dom/on "keydown" (e/fn [e] (.stopPropagation e))))
                (ui/button (e/fn []
-                            (when (seq filepath)
-                              (let [succ? (e/server (e/offload #(load-db-file filepath)))]
-                                (swap! *client-state assoc :db-loaded succ?))))
+                            (let [succ? (e/server (e/offload #(load-db-file filepath)))]
+                                (swap! *client-state assoc :db-loaded succ?)))
                           (dom/text "Load"))))
             (StateInfo.)
             (when (e/server (some? (:conn (e/watch *conn-info))))
               (let [!k (atom nil)]
-                (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid")
+                (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid, try [:block/name \"test\"]")
                 (InputSubmit. (e/fn [v] (reset! !k v)) "key to display")
                 (dom/div (dom/props {:class "row"})
                  (OutlinerTreeView. !k)
