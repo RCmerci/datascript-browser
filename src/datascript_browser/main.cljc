@@ -33,9 +33,9 @@
   (with-out-str (fipp/pprint x opts)))
 
 (e/defn EdnView
-  [m]
+  [m & {:keys [width] :or {width 20}}]
   (e/client
-    (dom/pre (dom/text (pp-str m {:width 20})))))
+    (dom/pre (dom/text (pp-str m {:width width})))))
 
 
 (e/defn StateInfo
@@ -267,36 +267,50 @@
            (e/client
             (EdnView. block))))))))
 
+(e/defn TXDataView
+  []
+  (e/server
+   (let [server-state (e/watch *conn-info)
+         last-tx-data-index (some-> (:tx-data-index server-state) dec)
+         tx-data-log (:tx-data-log server-state)]
+     (when (<= 0 last-tx-data-index)
+       (let [tx-data (mapv (partial into []) (nth tx-data-log last-tx-data-index :not-found))]
+         (e/client
+           (prn :tx-data tx-data last-tx-data-index)
+           (EdnView. tx-data :width 100)))))))
+
+
 (e/defn OutlinerBrowser
   []
   (e/client
-   (dom/div (dom/props {:class "column"})
-            (dom/div
-             (let [!filepath (atom "tx-log-0.json") filepath (e/watch !filepath)]
-               (ui/input filepath (e/fn [v] (reset! !filepath v))
-                         (dom/props {:placeholder "DB filepath"})
-                         (dom/on "keydown" (e/fn [e] (.stopPropagation e))))
-               (ui/button (e/fn []
-                            (when-let [{:keys [tx-data-index tx-data-count file]}
-                                       (e/server (e/offload #(load-db-file filepath)))]
-                              (swap! *client-state assoc
-                                     :db-loaded true
-                                     :tx-data-index tx-data-index
-                                     :tx-data-count tx-data-count)))
-                          (dom/text "Load"))
-               (dom/strong
-                (dom/props {:style {:padding "10px"}})
-                (dom/text "⇄ to load more(or less) tx-data, ↑ to view parent-tree. "))))
-            (StateInfo.)
-            (when (e/server (some? (:conn (e/watch *conn-info))))
-              (let [!k (atom nil)]
-                (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid, try [:block/name \"test\"]")
-                (InputSubmit. (e/fn [v] (reset! !k v)) "key to display")
-                (TxLogProgressBar.)
-                (LoadTxData.)
-                (dom/div (dom/props {:class "row"})
-                         (OutlinerTreeView. !k)
-                         (BlockDetailView.)))))))
+    (dom/div (dom/props {:class "column"})
+             (dom/div
+               (let [!filepath (atom "tx-log-0.json") filepath (e/watch !filepath)]
+                 (ui/input filepath (e/fn [v] (reset! !filepath v))
+                   (dom/props {:placeholder "DB filepath"})
+                   (dom/on "keydown" (e/fn [e] (.stopPropagation e))))
+                 (ui/button (e/fn []
+                              (when-let [{:keys [tx-data-index tx-data-count file]}
+                                         (e/server (e/offload #(load-db-file filepath)))]
+                                (swap! *client-state assoc
+                                       :db-loaded true
+                                       :tx-data-index tx-data-index
+                                       :tx-data-count tx-data-count)))
+                   (dom/text "Load"))
+                 (dom/strong
+                   (dom/props {:style {:padding "10px"}})
+                   (dom/text "⇄ to load more(or less) tx-data, ↑ to view parent-tree. "))))
+             (StateInfo.)
+             (when (e/server (some? (:conn (e/watch *conn-info))))
+               (let [!k (atom nil)]
+                 (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid, try [:block/name \"test\"]")
+                 (InputSubmit. (e/fn [v] (reset! !k v)) "key to display")
+                 (TxLogProgressBar.)
+                 (LoadTxData.)
+                 (dom/div (dom/props {:class "row"})
+                          (OutlinerTreeView. !k)
+                          (BlockDetailView.)
+                          (TXDataView.)))))))
 
 
 
