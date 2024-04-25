@@ -2,6 +2,7 @@
   (:require [hyperfiddle.electric :as e]
             [hyperfiddle.electric-dom2 :as dom]
             [hyperfiddle.electric-ui4 :as ui]
+            [missionary.core :as m]
             [fipp.edn :as fipp]
             [clojure.zip :as z]
             [clojure.set :as set]
@@ -16,6 +17,7 @@
                           :tx-data-log nil
                           :tx-data-index nil
                           :tx-data-count nil
+                          :!transacting (atom nil)
                           :file nil
                           :err  nil
                           :invalid-outliner-data-info []
@@ -80,11 +82,14 @@
                  (recur next (conj! result next))
                  (vec (persistent! result))))]
          (when (not= (count blocks) (count r))
-           (swap! *conn-info update :invalid-outliner-data-info conj
+           (swap! *conn-info assoc :invalid-outliner-data-info
                   {:ex-message "bad :block/left"
-                   :ex-data {:blocks (mapv (partial into {}) blocks)
-                             :result (mapv (partial into {}) r)
-                             :diff (mapv (partial into {}) (set/difference (set blocks) (set r)))}}))
+                   :ex-data {:index (:tx-data-index @*conn-info)
+                             :diff (mapv
+                                    (fn [b]
+                                      {:db/id (:db/id b)
+                                       :block/uuid (str (:block/uuid b))})
+                                    (set/difference (set blocks) (set r)))}}))
 
          r))
 
@@ -232,28 +237,32 @@
 
 (e/defn LoadTxData
   []
-  (e/client
-   (when-let [client-tx-data-index (:tx-data-index (e/watch *client-state))]
-     (e/server
-      (when-let [server-tx-data-index (:tx-data-index (e/watch *conn-info))]
-        (when (and (not= client-tx-data-index server-tx-data-index)
-                   (<= client-tx-data-index (:tx-data-count @*conn-info)))
-          (if (> 10 (- client-tx-data-index server-tx-data-index))
-            (let [conn (:conn @*conn-info)
-                  reverse? (< client-tx-data-index server-tx-data-index)
-                  start (if reverse? client-tx-data-index server-tx-data-index)
-                  end (if reverse? server-tx-data-index client-tx-data-index)
-                  tx-data-coll (subvec (:tx-data-log @*conn-info) start end)]
-              (e/offload #(do (incremental-load-tx-data conn tx-data-coll reverse?)
-                              (swap! *conn-info assoc
-                                     :tx-data-index client-tx-data-index))))
-            (let [init-db (:init-db @*conn-info)
-                  tx-data-coll (subvec (:tx-data-log @*conn-info) 0 client-tx-data-index)
-                  new-conn (e/offload #(reload-tx-data init-db tx-data-coll))]
-              (swap! *conn-info assoc
-                     :conn new-conn
-                     :tx-data-index client-tx-data-index)))
-          nil))))))
+  (e/server
+    (when-let [client-tx-data-index (e/client (:tx-data-index (e/watch *client-state)))]
+      (let [client-tx-data-index* (new (m/latest identity (e/throttle 500 (e/flow client-tx-data-index))))
+            server-state (e/watch *conn-info)]
+        (e/offload
+         #(e/discard
+            (when (compare-and-set! (:!transacting server-state) nil client-tx-data-index*)
+              (when-let [server-tx-data-index (:tx-data-index server-state)]
+                (when (and (not= client-tx-data-index* server-tx-data-index)
+                           (<= client-tx-data-index* (:tx-data-count server-state)))
+                  (if (> 10 (abs (- client-tx-data-index* server-tx-data-index)))
+                    (let [conn (:conn @*conn-info)
+                          reverse? (< client-tx-data-index* server-tx-data-index)
+                          start (if reverse? client-tx-data-index* server-tx-data-index)
+                          end (if reverse? server-tx-data-index client-tx-data-index*)
+                          tx-data-coll (subvec (:tx-data-log @*conn-info) start end)]
+                      (incremental-load-tx-data conn tx-data-coll reverse?)
+                      (swap! *conn-info assoc
+                             :tx-data-index client-tx-data-index*))
+                    (let [init-db (:init-db @*conn-info)
+                          tx-data-coll (subvec (:tx-data-log @*conn-info) 0 client-tx-data-index*)
+                          new-conn (reload-tx-data init-db tx-data-coll)]
+                      (swap! *conn-info assoc
+                             :conn new-conn
+                             :tx-data-index client-tx-data-index*)))))
+              (reset! (:!transacting server-state) nil))))))))
 
 
 (e/defn BlockDetailView
@@ -276,7 +285,6 @@
      (when (<= 0 last-tx-data-index)
        (let [tx-data (mapv (partial into []) (nth tx-data-log last-tx-data-index :not-found))]
          (e/client
-           (prn :tx-data tx-data last-tx-data-index)
            (EdnView. tx-data :width 100)))))))
 
 
@@ -344,5 +352,4 @@
                  (prn :press (-> e .-key))
 
                  )))
-
      (OutlinerBrowser.))))
