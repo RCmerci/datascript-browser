@@ -4,6 +4,7 @@
             [hyperfiddle.electric-ui4 :as ui]
             [fipp.edn :as fipp]
             [clojure.zip :as z]
+            [clojure.set :as set]
             #?(:clj [datascript.core :as d])
             #?(:clj [datascript.transit :as dt])
             #?(:clj [clojure.java.io :as io])
@@ -11,14 +12,21 @@
 
 #?(:clj
    (def *conn-info (atom {:conn nil
+                          :init-db nil
+                          :tx-data-log nil
+                          :tx-data-index nil
+                          :tx-data-count nil
                           :file nil
-                          :err  nil})))
+                          :err  nil
+                          :invalid-outliner-data-info []
+                          })))
 
 #?(:cljs
    (def *client-state (atom {:db-loaded false
+                             :tx-data-index nil
+                             :tx-data-count nil
                              :outliner-root-eid nil
-                             :block-detail-eid nil
-                             :block-detail nil})))
+                             :block-detail-eid nil})))
 
 (defn pp-str
   [x & [opts]]
@@ -33,36 +41,52 @@
 (e/defn StateInfo
   []
   (e/client
-   (let [conn-info (e/server (select-keys (e/watch *conn-info) [:file :err]))
+   (let [conn-info (e/server (select-keys (e/watch *conn-info)
+                                          [:file :err :tx-data-index :tx-data-count :invalid-outliner-data-info]))
          client-state (e/watch *client-state)]
      (dom/div (dom/props {:class "row"})
               (EdnView. (assoc conn-info :type :server))
               (EdnView. (-> client-state
-                            (assoc :type :client)
-                            (dissoc :block-detail)))))))
+                            (assoc :type :client)))))))
 
 #?(:clj
    (do
      (defn- load-db-file
        [filepath]
        (try
-         (let [conn (d/conn-from-db (dt/read-transit (io/input-stream (io/file filepath))))]
-           (swap! *conn-info assoc :conn conn :file filepath :err nil)
-           true)
+         (let [{:keys [init-db tx-log]} (dt/read-transit (io/input-stream (io/file filepath)))
+               conn (d/conn-from-db init-db)]
+           (swap! *conn-info assoc
+                  :init-db init-db
+                  :conn conn
+                  :tx-data-log tx-log
+                  :tx-data-index 0
+                  :tx-data-count (count tx-log)
+                  :file filepath :err nil)
+           (select-keys @*conn-info [:tx-data-index :tx-data-count :file]))
          (catch Exception e
            (swap! *conn-info assoc :conn nil :file filepath :err (ex-message e))
-           false)))
+           nil)))
 
      (defn- sort-by-left
        [blocks parent]
        (let [left->blocks (->> (reduce (fn [acc b] (assoc! acc (:db/id (:block/left b)) b))
                                        (transient {}) blocks)
-                               (persistent!))]
-         (loop [block parent
-                result (transient [])]
-           (if-let [next (get left->blocks (:db/id block))]
-             (recur next (conj! result next))
-             (vec (persistent! result))))))
+                               (persistent!))
+             r
+             (loop [block parent
+                    result (transient [])]
+               (if-let [next (get left->blocks (:db/id block))]
+                 (recur next (conj! result next))
+                 (vec (persistent! result))))]
+         (when (not= (count blocks) (count r))
+           (swap! *conn-info update :invalid-outliner-data-info conj
+                  {:ex-message "bad :block/left"
+                   :ex-data {:blocks (mapv (partial into {}) blocks)
+                             :result (mapv (partial into {}) r)
+                             :diff (mapv (partial into {}) (set/difference (set blocks) (set r)))}}))
+
+         r))
 
      (defn- get-one-level-children-blocks
        [root-entity]
@@ -129,29 +153,32 @@
 (e/defn OutlinerTreeViewHelper
   [tree k]
   (e/client
-    (let [list-with-level (tree->list-with-level tree)]
-      (dom/div
-        (dom/props {:id "outliner-tree"})
-        (e/for-by
-            :db/id [x list-with-level]
-            (dom/pre (dom/props {:style {:padding-left (str (* (:level x) 10) "px")}})
-                     (dom/text "- " (str (get x k)))
-                     (dom/on "click" (e/fn [e] (swap! *client-state assoc
-                                                      :block-detail-eid (:db/id x)
-                                                      :block-detail x)))))))))
+   (let [list-with-level (tree->list-with-level tree)]
+     (dom/div
+      (dom/props {:id "outliner-tree"})
+      (e/for-by
+       hash [x list-with-level]
+       (dom/pre (dom/props {:style {:padding-left (str (* (:level x) 10) "px")}})
+                (dom/text "- " (str (get x k)))
+                (dom/on! "click" (fn [e] (swap! *client-state assoc
+                                                :block-detail-eid (:db/id x))))))))))
 
 
 (e/defn OutlinerTreeView
   [!k]
   (e/client
-    (let [root-eid (:outliner-root-eid (e/watch *client-state))
-          root-eid (if (string? root-eid) (edn/read-string root-eid) root-eid)
-          k (or (edn/read-string (e/watch !k)) :db/id)]
-      (when root-eid
-        (let [tree
-              (e/server
-                (e/offload #(get-block-tree root-eid)))]
-          (OutlinerTreeViewHelper. tree k))))))
+   (let [client-state (e/watch *client-state)
+         root-eid (:outliner-root-eid client-state)
+         client-tx-data-index (:tx-data-index client-state)
+         root-eid (if (string? root-eid) (edn/read-string root-eid) root-eid)
+         k (or (edn/read-string (e/watch !k)) :db/id)]
+     (when (and root-eid client-tx-data-index)
+       (let [tree
+             (e/server
+              (let [server-tx-data-index (:tx-data-index (e/watch *conn-info))]
+                (e/offload #(do (prn :server-get-block-tree server-tx-data-index)
+                                (get-block-tree root-eid)))))]
+         (OutlinerTreeViewHelper. tree k))))))
 
 (e/defn InputSubmit
   [F placeholder]
@@ -164,28 +191,109 @@
                                     (when-let [v (not-empty (-> e .-target .-value))]
                                       (new F v))))))))
 
+(e/defn TxLogProgressBar
+  []
+  (e/client
+   (let [{:keys [tx-data-index tx-data-count]} (e/watch *client-state)
+         !index-to-update (atom tx-data-index)]
+     (dom/div
+      (dom/props {:class "row"})
+      (ui/range tx-data-index (e/fn [v] (swap! *client-state assoc :tx-data-index v))
+                (dom/props {:max tx-data-count}))
+      (ui/long tx-data-index (e/fn [v] (reset! !index-to-update v))
+               (dom/props {:style {:height "10px" :width "50px"}})
+               (dom/on "keydown" (e/fn [e]
+                                   (.stopPropagation e)
+                                   (when (= "Enter" (.-key e))
+                                     (when-let [v (parse-long (-> e .-target .-value))]
+                                       (swap! *client-state assoc :tx-data-index v))))))))))
+
+
+#?(:clj
+   (do
+     (defn- reload-tx-data
+       [init-db tx-data-coll]
+       (let [conn (d/conn-from-db init-db)]
+         (doseq [tx-data tx-data-coll]
+           (let [tx-data* (mapv (fn [[e a v _t add?]]
+                                  [(if add? :db/add :db/retract) e a v])
+                                tx-data)]
+             (d/transact! conn tx-data*)))
+         conn))
+
+     (defn- incremental-load-tx-data
+       [conn tx-data-coll reverse?]
+       (doseq [tx-data (if reverse? (reverse tx-data-coll) tx-data-coll)]
+         (let [tx-data* (mapv (fn [[e a v _ add?]]
+                                (let [add? (if reverse? (not add?) add?)]
+                                  [(if add? :db/add :db/retract) e a v]))
+                              tx-data)]
+           (d/transact! conn tx-data*))))))
+
+(e/defn LoadTxData
+  []
+  (e/client
+   (when-let [client-tx-data-index (:tx-data-index (e/watch *client-state))]
+     (e/server
+      (when-let [server-tx-data-index (:tx-data-index (e/watch *conn-info))]
+        (when (and (not= client-tx-data-index server-tx-data-index)
+                   (<= client-tx-data-index (:tx-data-count @*conn-info)))
+          (if (> 10 (- client-tx-data-index server-tx-data-index))
+            (let [conn (:conn @*conn-info)
+                  reverse? (< client-tx-data-index server-tx-data-index)
+                  start (if reverse? client-tx-data-index server-tx-data-index)
+                  end (if reverse? server-tx-data-index client-tx-data-index)
+                  tx-data-coll (subvec (:tx-data-log @*conn-info) start end)]
+              (e/offload #(do (incremental-load-tx-data conn tx-data-coll reverse?)
+                              (swap! *conn-info assoc
+                                     :tx-data-index client-tx-data-index))))
+            (let [init-db (:init-db @*conn-info)
+                  tx-data-coll (subvec (:tx-data-log @*conn-info) 0 client-tx-data-index)
+                  new-conn (e/offload #(reload-tx-data init-db tx-data-coll))]
+              (swap! *conn-info assoc
+                     :conn new-conn
+                     :tx-data-index client-tx-data-index)))
+          nil))))))
+
+
+(e/defn BlockDetailView
+  []
+  (e/server
+   (when-let [conn (:conn (e/watch *conn-info))]
+     (let [db (e/watch conn)]
+       (when-let [eid (e/client (:block-detail-eid (e/watch *client-state)))]
+         (let [block (some-> (d/pull db '[*] eid)
+                             (update :block/uuid str))]
+           (e/client
+            (EdnView. block))))))))
+
 (e/defn OutlinerBrowser
   []
   (e/client
-   (dom/div (dom/props {:class "column"})
-            (dom/div
-             (let [!filepath (atom "db.json") filepath (e/watch !filepath)]
-               (ui/input filepath (e/fn [v] (reset! !filepath v))
-                 (dom/props {:placeholder "DB filepath"})
-                 (dom/on "keydown" (e/fn [e] (.stopPropagation e))))
-               (ui/button (e/fn []
-                            (let [succ? (e/server (e/offload #(load-db-file filepath)))]
-                                (swap! *client-state assoc :db-loaded succ?)))
-                          (dom/text "Load"))))
-            (StateInfo.)
-            (when (e/server (some? (:conn (e/watch *conn-info))))
-              (let [!k (atom nil)]
-                (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid, try [:block/name \"test\"]")
-                (InputSubmit. (e/fn [v] (reset! !k v)) "key to display")
-                (dom/div (dom/props {:class "row"})
-                 (OutlinerTreeView. !k)
-                 (when-let [block-detail (:block-detail (e/watch *client-state))]
-                   (EdnView. block-detail))))))))
+    (dom/div (dom/props {:class "column"})
+             (dom/div
+               (let [!filepath (atom "tx-log-0.json") filepath (e/watch !filepath)]
+                 (ui/input filepath (e/fn [v] (reset! !filepath v))
+                   (dom/props {:placeholder "DB filepath"})
+                   (dom/on "keydown" (e/fn [e] (.stopPropagation e))))
+                 (ui/button (e/fn []
+                              (when-let [{:keys [tx-data-index tx-data-count file]}
+                                         (e/server (e/offload #(load-db-file filepath)))]
+                                (swap! *client-state assoc
+                                       :db-loaded true
+                                       :tx-data-index tx-data-index
+                                       :tx-data-count tx-data-count)))
+                   (dom/text "Load"))))
+             (StateInfo.)
+             (when (e/server (some? (:conn (e/watch *conn-info))))
+               (let [!k (atom nil)]
+                 (InputSubmit. (e/fn [v] (swap! *client-state assoc :outliner-root-eid (edn/read-string v))) "eid, try [:block/name \"test\"]")
+                 (InputSubmit. (e/fn [v] (reset! !k v)) "key to display")
+                 (TxLogProgressBar.)
+                 (LoadTxData.)
+                 (dom/div (dom/props {:class "row"})
+                          (OutlinerTreeView. !k)
+                          (BlockDetailView.)))))))
 
 
 
@@ -195,13 +303,29 @@
    (binding [dom/node js/document.body]
      (dom/on dom/node "keydown"
              (e/fn [e]
-               (when (and (= "ArrowUp" (-> e .-key))
-                          (:db-loaded @*client-state))
-                 (when-let [root-eid (:outliner-root-eid @*client-state)]
-                   (let [up-eid
-                         (e/server
-                          (when-let [conn (:conn @*conn-info)]
-                            (:db/id (:block/parent (d/entity @conn root-eid)))))]
-                     (when up-eid
-                       (swap! *client-state assoc :outliner-root-eid up-eid)))))))
+               (case (-> e .-key)
+                 "ArrowUp"
+                 (when (:db-loaded @*client-state)
+                   (when-let [root-eid (:outliner-root-eid @*client-state)]
+                     (let [up-eid
+                           (e/server
+                            (when-let [conn (:conn @*conn-info)]
+                              (:db/id (:block/parent (d/entity @conn root-eid)))))]
+                       (when up-eid
+                         (swap! *client-state assoc :outliner-root-eid up-eid)))))
+
+                 "ArrowLeft"
+                 (when (:db-loaded @*client-state)
+                   (swap! *client-state update :tx-data-index (fn [idx] (if (pos? idx) (dec idx) 0))))
+                 "ArrowRight"
+                 (when (:db-loaded @*client-state)
+                   (swap! *client-state update :tx-data-index (fn [idx]
+                                                                (if (< idx (:tx-data-count @*client-state))
+                                                                  (inc idx)
+                                                                  (:tx-data-count @*client-state)))))
+
+                 (prn :press (-> e .-key))
+
+                 )))
+
      (OutlinerBrowser.))))
